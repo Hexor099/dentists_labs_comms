@@ -7,7 +7,7 @@ import React, { useState, useEffect } from "react";
 import { 
   Building2, ClipboardList, HardDrive, Compass, Bell, 
   MessageSquare, Stethoscope, UserCheck, Briefcase, HelpCircle, AlertCircle,
-  Receipt, BookOpen, Info, ChevronRight, Plus, Sun, Moon
+  Receipt, BookOpen, Info, ChevronRight, Plus, Sun, Moon, LogOut
 } from "lucide-react";
 import { UserRole } from "./types";
 import DentistDashboardView from "./components/DentistDashboardView";
@@ -19,6 +19,9 @@ import NotificationsView from "./components/NotificationsView";
 import ChatView from "./components/ChatView";
 import InvoicesView from "./components/InvoicesView";
 import DeliveriesView from "./components/DeliveriesView";
+import LandingView from "./components/LandingView";
+import LoginView from "./components/LoginView";
+import SignupView from "./components/SignupView";
 import { Truck } from "lucide-react";
 
 type TabKey = 
@@ -38,9 +41,53 @@ interface ToastNotification {
 }
 
 export default function App() {
- // Global simulated active actor identity (swappable for seamless preview experience)
- const [activeRole, setActiveRole] = useState<UserRole>(UserRole.DENTIST);
- const [activeTab, setActiveTab] = useState<TabKey>("dentist_dash");
+  const [authState, setAuthState] = useState<'landing' | 'login' | 'signup' | 'app'>('landing');
+
+  // Global simulated active actor identity (swappable for seamless preview experience)
+  const [activeRole, setActiveRole] = useState<UserRole>(UserRole.DENTIST);
+  const [activeUserName, setActiveUserName] = useState<string>("Dr. Guest");
+  const [activeTab, setActiveTab] = useState<TabKey>("dentist_dash");
+
+  // Handle browser back/forward buttons via hash routing
+  useEffect(() => {
+    const handleHashChange = () => {
+      const hash = window.location.hash.replace('#', '');
+      if (hash === 'login') setAuthState('login');
+      else if (hash === 'signup') setAuthState('signup');
+      else if (hash === 'landing' || !hash) setAuthState('landing');
+      else if (hash.startsWith('app/')) {
+        setAuthState('app');
+        const tab = hash.replace('app/', '') as TabKey;
+        setActiveTab(tab);
+      }
+    };
+    
+    window.addEventListener('popstate', handleHashChange);
+    handleHashChange(); // Configure initial state from URL
+    
+    return () => window.removeEventListener('popstate', handleHashChange);
+  }, []);
+
+  // Ensure hash stays in sync with current state
+  useEffect(() => {
+    const newHash = authState === 'app' ? `app/${activeTab}` : authState;
+    if (window.location.hash !== `#${newHash}`) {
+      window.history.pushState(null, '', `#${newHash}`);
+    }
+  }, [authState, activeTab]);
+
+  const handleAuthNavigation = (view: 'landing' | 'login' | 'signup' | 'app') => {
+    setAuthState(view);
+  };
+
+  const handleLogin = (role: UserRole, fullName: string) => {
+    setActiveRole(role);
+    setActiveUserName(fullName || role.replace("_", " "));
+    setAuthState('app');
+    if (role === UserRole.DENTIST) setActiveTab("dentist_dash");
+    else if (role === UserRole.LAB_ADMIN) setActiveTab("lab_admin_dash");
+    else if (role === UserRole.TECHNICIAN) setActiveTab("tech_dash");
+  };
 
  // Single-theme configuration: Clinical Light Medical SaaS (#FFFFFF, #F8FAFC, #E5E7EB, #2563EB)
  const [showGuidedHelper, setShowGuidedHelper] = useState<boolean>(true);
@@ -299,8 +346,20 @@ export default function App() {
  { key: "chat", label: "Secure Lab Chat", icon: <MessageSquare className="w-4 h-4" /> }
  ];
 
- return (
- <div id="densync-app-container" className="min-h-screen font-sans bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-50 selection:bg-blue-100 selection:text-blue-800 dark:text-blue-200 flex flex-col relative transition-all duration-300">
+  if (authState === 'landing') {
+    return <LandingView onNavigate={handleAuthNavigation} />;
+  }
+
+  if (authState === 'login') {
+    return <LoginView onLogin={handleLogin} onNavigate={handleAuthNavigation} />;
+  }
+
+  if (authState === 'signup') {
+    return <SignupView onSignup={handleLogin} onNavigate={handleAuthNavigation} />;
+  }
+
+  return (
+  <div id="densync-app-container" className="min-h-screen font-sans bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-50 selection:bg-blue-100 selection:text-blue-800 dark:text-blue-200 flex flex-col relative transition-all duration-300">
  
  {/* Real-time sync notifications ribbon */}
  <div className="bg-blue-600 dark:bg-blue-500 text-white text-xs py-2 px-6 flex justify-between items-center select-none font-medium">
@@ -346,37 +405,9 @@ export default function App() {
  <div className="flex flex-wrap items-center gap-3 w-full lg:w-auto justify-between lg:justify-end">
  
  <div className="flex items-center gap-2">
- <span className="text-sm font-semibold text-slate-500 dark:text-slate-400 dark:text-slate-500 font-medium text-sm">Active User Profile:</span>
- <div className="flex bg-slate-100 dark:bg-slate-800/80 p-1 rounded-xl border border-slate-200 dark:border-slate-700 gap-1 select-none">
- {[
- { role: UserRole.DENTIST, label: "Dentist" },
- { role: UserRole.LAB_ADMIN, label: "Lab Admin" },
- { role: UserRole.TECHNICIAN, label: "Technician" }
- ].map(item => (
- <button
- key={item.role}
- id={`btn-persona-${item.role.toLowerCase()}`}
- onClick={() => {
- setActiveRole(item.role);
- // Match tab automatically
- if (item.role === UserRole.DENTIST) {
- setActiveTab("dentist_dash");
- } else if (item.role === UserRole.LAB_ADMIN) {
- setActiveTab("lab_admin_dash");
- } else {
- setActiveTab("tech_dash");
- }
- triggerToast(`Switched login profile: ${item.label}`);
- }}
- className={`px-3 py-1.5 text-xs rounded-lg transition-all ${
- activeRole === item.role
- ? "bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 font-bold border border-slate-200 dark:border-slate-700 shadow-sm"
- : "text-slate-500 dark:text-slate-400 dark:text-slate-500 hover:text-slate-800 dark:text-slate-200"
- }`}
- >
- {item.label}
- </button>
- ))}
+ <span className="text-sm font-semibold text-slate-500 dark:text-slate-400 font-medium whitespace-nowrap">Welcome, {activeUserName}</span>
+ <div className="hidden sm:flex bg-slate-100 dark:bg-slate-800/80 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 gap-1 select-none">
+  <span className="text-xs font-bold text-blue-600 dark:text-blue-400">{activeRole.replace("_", " ")}</span>
  </div>
  </div>
 
@@ -403,6 +434,17 @@ export default function App() {
  >
  <BookOpen className="w-4 h-4 text-blue-600 dark:text-blue-400" />
  <span>Companion Help</span>
+ </button>
+
+ <button
+ onClick={() => {
+   setAuthState('landing');
+ }}
+ className="p-2 px-3 border border-red-200 dark:border-red-800/60 text-red-600 dark:text-red-400 rounded-xl bg-white dark:bg-slate-900 hover:bg-red-50 dark:hover:bg-red-900/20 font-bold text-xs flex items-center gap-1.5 shadow-xs transition-all"
+ title="Log out"
+ >
+   <LogOut className="w-4 h-4" />
+   <span className="hidden sm:inline">Log Out</span>
  </button>
  </div>
  </div>

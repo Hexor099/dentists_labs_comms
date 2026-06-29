@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { WebSocketServer, WebSocket } from "ws";
+import { Invoice, PaymentRecord, DeliveryRecord } from "./src/types";
 
 dotenv.config();
 
@@ -52,226 +53,93 @@ interface NotificationItem {
   smtpPayload?: string; // SMTP diagnostic logs for audit trace
 }
 
-// In-Memory tables representing real database models
-let chatMessages: ChatMessage[] = [
-  { id: "msg-1", channel: "dentist_lab", sender: "Dr. Catherine Vance", role: "DENTIST", text: "Hey Sophia, is the multilayer zirconia crown for patient R. M. ready for dispatch? The patient is scheduled for seating tomorrow at 9 AM.", time: "10:15 AM", timestamp: new Date(Date.now() - 3600 * 1000).toISOString(), readBy: ["DENTIST", "LAB_ADMIN"] },
-  { id: "msg-2", channel: "dentist_lab", sender: "Sophia Miller", role: "LAB_ADMIN", text: "Let me check with Marcus. It's currently showing Assigned in production on his workstation logs.", time: "10:17 AM", timestamp: new Date(Date.now() - 3400 * 1000).toISOString(), readBy: ["LAB_ADMIN"] },
-  { id: "msg-3", channel: "internal_lab", sender: "Sophia Miller", role: "LAB_ADMIN", text: "Marcus, please verify when you can shift Case #case-001 (R. M.) to Quality Control. Dentist needs it tomorrow morning.", time: "10:18 AM", timestamp: new Date(Date.now() - 3300 * 1000).toISOString(), readBy: ["LAB_ADMIN", "TECHNICIAN"] },
-  { id: "msg-4", channel: "internal_lab", sender: "Marcus Aurelius", role: "TECHNICIAN", text: "Just pulled it from Sintering Block #12. Temperature calibrated correctly. Handing over to Quality Check desk shortly!", time: "10:20 AM", timestamp: new Date(Date.now() - 3200 * 1000).toISOString(), readBy: ["TECHNICIAN", "LAB_ADMIN"] }
-];
+import { createJsonDb } from "./src/jsonDb";
 
-let caseComments: CaseComment[] = [
-  { id: "cmt-1", caseId: "case-001", sender: "Dr. Catherine Vance", role: "DENTIST", text: "Please use high-strength multilayer zirconia block.", time: "15:42", timestamp: "2026-06-18T10:15:00.000Z" },
-  { id: "cmt-2", caseId: "case-001", sender: "Sophia Miller", role: "LAB_ADMIN", text: "Assigned stage PORCELAIN_LAYERING weight is configured.", time: "16:01", timestamp: "2026-06-18T10:30:00.000Z" },
-  { id: "cmt-3", caseId: "case-002", sender: "Dr. Catherine Vance", role: "DENTIST", text: "Dr. Vance requested OM1 bleach shade veneers.", time: "16:15", timestamp: "2026-06-18T11:00:00.000Z" }
-];
+// In-Memory tables representing real database models (Now persisted)
+const defaultDb = {
+  chatMessages: [] as ChatMessage[],
+  caseComments: [] as CaseComment[],
+  notificationsHistory: [] as NotificationItem[],
+  invoicesList: [] as Invoice[],
+  deliveriesList: [] as DeliveryRecord[]
+};
 
-let notificationsHistory: NotificationItem[] = [
-  { id: "NT-101", category: "clinical", level: "warning", title: "Molar Scan Calibration Warning", message: "Intraoral file 'Apex_UpperJaw_3DScan.ply' exceeds optimal buccal margin deviation threshold by +0.02mm. Manual refinement is advised.", time: "10 mins ago", unread: true, type: "push" },
-  { id: "NT-102", category: "delivery", level: "success", title: "Orthodontic Case #CS-001 Complete", message: "Sophia Miller authorized the final shipment. Case shipped to Dr. Catherine Vance (Apex Dentistry) via standard courier. Tracking ID: DX-40392.", time: "42 mins ago", unread: true, type: "both", smtpPayload: "SMTP OUTBOUND: To: dr.vance@apex-dental.com. Subject: Case CS-001 Dispatched." },
-  { id: "NT-103", category: "system", level: "error", title: "Weiland Milling Machine Error: Block Calibration", message: "Aesthetic substrate mill failed tool-length sensor check. Auto-pausing production batch on Milling Station Alpha.", time: "2 hours ago", unread: false, type: "push" },
-  { id: "NT-104", category: "clinical", level: "info", title: "Dr. Catherine Vance created Case #case-001", message: "Zirconia single crown order submitted with design-fit request. Patient info hash matched.", time: "5 hours ago", unread: false, type: "both", smtpPayload: "SMTP OUTBOUND: To: contact@densync.com. Subject: New Case Created #case-001" }
-];
+let appDb: any;
+let chatMessages: any;
+let caseComments: any;
+let notificationsHistory: any;
+let invoicesList: any;
+let deliveriesList: any;
 
-// Invoicing & Payment Database Structures
-interface InvoiceItem {
-  id: string;
-  description: string;
-  quantity: number;
-  unitPrice: number;
-  amount: number;
-}
+import bcrypt from 'bcryptjs';
+import { db } from './src/db/index';
+import { users } from './src/db/schema';
+import { eq, desc, inArray } from 'drizzle-orm';
 
-interface PaymentRecord {
-  id: string;
-  amount: number;
-  paymentMethod: "credit_card" | "bank_transfer" | "check" | "stripe";
-  transactionId?: string;
-  timestamp: string;
-}
+// Schema is managed by drizzle-kit update schema
 
-interface Invoice {
-  id: string;
-  caseId?: string;
-  dentistName: string;
-  clinicName: string;
-  issuedDate: string;
-  dueDate: string;
-  items: InvoiceItem[];
-  subtotal: number;
-  gstRate: number;
-  gstAmount: number;
-  totalAmount: number;
-  totalPaid: number;
-  outstandingBalance: number;
-  status: "unpaid" | "partially_paid" | "paid" | "void";
-  payments: PaymentRecord[];
-  pdfTemplateId?: string;
-}
-
-let invoicesList: Invoice[] = [
-  {
-    id: "INV-2026-001",
-    caseId: "case-001",
-    dentistName: "Dr. Catherine Vance",
-    clinicName: "Apex Cosmetic Dentistry Inc.",
-    issuedDate: "2026-06-12",
-    dueDate: "2026-06-27",
-    items: [
-      { id: "item-1", description: "IPS e.max Translucent Sintered Esthetic Crown (#14)", quantity: 1, unitPrice: 380, amount: 380 },
-      { id: "item-2", description: "CAD/CAM Digital Sculpting & Sintering Surcharge", quantity: 1, unitPrice: 70, amount: 70 }
-    ],
-    subtotal: 450,
-    gstRate: 0.15, // 15% GST standard rate
-    gstAmount: 67.5,
-    totalAmount: 517.5,
-    totalPaid: 517.5,
-    outstandingBalance: 0,
-    status: "paid",
-    payments: [
-      { id: "PAY-901", amount: 517.5, paymentMethod: "credit_card", transactionId: "txn_58302cba", timestamp: "2026-06-14T09:30:00Z" }
-    ],
-    pdfTemplateId: "modern"
-  },
-  {
-    id: "INV-2026-002",
-    caseId: "case-002",
-    dentistName: "Dr. Catherine Vance",
-    clinicName: "Apex Cosmetic Dentistry Inc.",
-    issuedDate: "2026-06-15",
-    dueDate: "2026-06-30",
-    items: [
-      { id: "item-3", description: "Premium Feldspathic Veneer (#7, #8, #9, #10 - High Bleach OM1)", quantity: 4, unitPrice: 420, amount: 1680 },
-      { id: "item-4", description: "Precision Microscopic Prep-Margin Audit Surcharge", quantity: 1, unitPrice: 120, amount: 120 }
-    ],
-    subtotal: 1800,
-    gstRate: 0.15,
-    gstAmount: 270,
-    totalAmount: 2070,
-    totalPaid: 500,
-    outstandingBalance: 1570,
-    status: "partially_paid",
-    payments: [
-      { id: "PAY-902", amount: 500, paymentMethod: "bank_transfer", transactionId: "txn_1092abf4", timestamp: "2026-06-16T15:45:00Z" }
-    ],
-    pdfTemplateId: "clinical"
-  },
-  {
-    id: "INV-2026-003",
-    caseId: "case-003",
-    dentistName: "Dr. Arthur Pendelton",
-    clinicName: "Metropolitan Family Orthodontics",
-    issuedDate: "2026-06-18",
-    dueDate: "2026-07-03",
-    items: [
-      { id: "item-5", description: "Custom Titanium Abutment w/ Sintered Zirconia Crown (#30)", quantity: 1, unitPrice: 750, amount: 750 },
-      { id: "item-6", description: "Implant Analog Interface Catalog Verification Fee", quantity: 1, unitPrice: 95, amount: 95 }
-    ],
-    subtotal: 845,
-    gstRate: 0.15,
-    gstAmount: 126.75,
-    totalAmount: 971.75,
-    totalPaid: 0,
-    outstandingBalance: 971.75,
-    status: "unpaid",
-    payments: [],
-    pdfTemplateId: "modern"
+// ----------------------------------------------------------------------------
+// AUTHENTICATION ROUTES (Using real DBMS)
+// ----------------------------------------------------------------------------
+app.post("/api/auth/signup", async (req, res) => {
+  try {
+    const { email, password, fullName, role, labName, gstin, clinicName } = req.body;
+    if (!email || !password || !fullName || !role) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+    
+    // Hash the password securely
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const userId = "USR-" + Math.random().toString(36).substring(2, 9);
+    
+    await db.insert(users).values({
+      id: userId,
+      email,
+      password: hashedPassword,
+      fullName,
+      role,
+      labName: labName || null,
+      gstin: gstin || null,
+      clinicName: clinicName || null,
+      createdAt: new Date().toISOString()
+    });
+    
+    res.json({ success: true, role });
+  } catch (err: any) {
+    if (err.message?.includes('duplicate key value') || err.message?.includes('UNIQUE constraint failed')) {
+      res.status(409).json({ error: "Email already registered." });
+    } else {
+      console.error(err);
+      res.status(500).json({ error: "Internal server error" });
+    }
   }
-];
+});
 
-// Delivery & Dispatch Database Structures
-interface DeliveryMilestone {
-  status: "packed" | "shipped" | "out_for_delivery" | "delivered";
-  title: string;
-  description: string;
-  timestamp: string;
-  location?: string;
-}
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: "Missing email or password" });
+    }
 
-interface DeliveryRecord {
-  id: string;
-  caseId: string;
-  patientInitials: string;
-  dentistName: string;
-  clinicName: string;
-  carrier: "FedEx" | "UPS" | "DHL" | "Local Courier";
-  trackingNumber: string;
-  status: "packed" | "shipped" | "out_for_delivery" | "delivered";
-  shippedDate?: string;
-  deliveredDate?: string;
-  estimatedDeliveryDate?: string;
-  notes?: string;
-  recipientSignee?: string;
-  milestones: DeliveryMilestone[];
-}
+    const result = await db.select().from(users).where(eq(users.email, email)).limit(1);
+    if (!result || result.length === 0) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+    
+    const user = result[0];
+    const passwordMatch = await bcrypt.compare(password, user.password);
+    
+    if (!passwordMatch) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
 
-let deliveriesList: DeliveryRecord[] = [
-  {
-    id: "DEL-2026-8032",
-    caseId: "case-001",
-    patientInitials: "R. M.",
-    dentistName: "Dr. Catherine Vance",
-    clinicName: "Apex Cosmetic Dentistry Inc.",
-    carrier: "Local Courier",
-    trackingNumber: "LC-852496-BOS",
-    status: "packed",
-    notes: "Requires signature upon medical reception. Protect from mechanical shock.",
-    estimatedDeliveryDate: "2026-06-19",
-    milestones: [
-      {
-        status: "packed",
-        title: "Order Sintered & Packed",
-        description: "Crown polished, sterilised, and secured in lab pan protective box.",
-        timestamp: new Date().toISOString(),
-        location: "Quality Workstation, DenSync Headquarters"
-      }
-    ]
-  },
-  {
-    id: "DEL-2026-7910",
-    caseId: "case-002",
-    patientInitials: "E. S.",
-    dentistName: "Dr. Catherine Vance",
-    clinicName: "Apex Cosmetic Dentistry Inc.",
-    carrier: "FedEx",
-    trackingNumber: "FDX-12049851-92",
-    status: "delivered",
-    shippedDate: "2026-06-16",
-    deliveredDate: "2026-06-17",
-    recipientSignee: "Receptionist Laura K.",
-    notes: "Feldspathic veneers multi-box unit.",
-    milestones: [
-      {
-         status: "packed",
-         title: "Prepared for Courier Handoff",
-         description: "Restoration boxed and padded with bubble cushions.",
-         timestamp: "2026-06-16T10:00:00Z",
-         location: "DenSync Loading Bay"
-      },
-      {
-         status: "shipped",
-         title: "Dispatched with FedEx Express",
-         description: "Package received at FedEx Boston Sort Facility.",
-         timestamp: "2026-06-16T14:30:00Z",
-         location: "Boston sorting depot"
-      },
-      {
-         status: "out_for_delivery",
-         title: "Out for Medical Ground Delivery",
-         description: "Vans dispatched to target healthcare area.",
-         timestamp: "2026-06-17T08:15:00Z",
-         location: "Apex Cosmetic Dentistry ground center"
-      },
-      {
-         status: "delivered",
-         title: "Delivered & Clinic Signed",
-         description: "Handoff successfully finalized. Signed by Receptionist Laura K.",
-         timestamp: "2026-06-17T11:45:00Z",
-         location: "Front Desk, Apex Cosmetic Dentistry"
-      }
-    ]
+    res.json({ success: true, role: user.role, fullName: user.fullName });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
-];
+});
 
 
 // Lazy register Gemini client to prevent startup failure if key is missing during container coldstarts
@@ -571,21 +439,21 @@ function broadcastToAllWebSockets(payload: any) {
 }
 
 // Get Chat History
-app.get("/api/chat/history", (req, res) => {
+app.get("/api/chat/history", async (req, res) => {
   const channel = req.query.channel as string || "dentist_lab";
-  const messages = chatMessages.filter(m => m.channel === channel);
+  const messages = chatMessages.filter((m: any) => m.channel === channel);
   res.json({ messages });
 });
 
 // Post Direct Message
-app.post("/api/chat/messages", (req, res) => {
+app.post("/api/chat/messages", async (req, res) => {
   const { channel, sender, role, text, attachment } = req.body;
   if (!channel || !sender || !role || !text) {
     res.status(400).json({ error: "Missing required fields: channel, sender, role, text." });
     return;
   }
 
-  const newMsg: ChatMessage = {
+  const newMsg = {
     id: `msg-${Date.now()}`,
     channel,
     sender,
@@ -598,6 +466,7 @@ app.post("/api/chat/messages", (req, res) => {
   };
 
   chatMessages.push(newMsg);
+  appDb.save();
 
   broadcastToAllWebSockets({
     type: "message_received",
@@ -607,7 +476,8 @@ app.post("/api/chat/messages", (req, res) => {
   // Create notifications alert
   const recipientRole = role === "DENTIST" ? "LAB_ADMIN" : "DENTIST";
   const shortMsg = text.length > 40 ? text.substring(0, 40) + "..." : text;
-  const newNotif: NotificationItem = {
+  
+  const newNotif = {
     id: `NT-${Date.now()}`,
     category: "clinical",
     level: "info",
@@ -621,7 +491,8 @@ app.post("/api/chat/messages", (req, res) => {
   };
 
   notificationsHistory.unshift(newNotif);
-  
+  appDb.save();
+
   broadcastToAllWebSockets({
     type: "notification_dispatched",
     data: { notification: newNotif }
@@ -631,20 +502,21 @@ app.post("/api/chat/messages", (req, res) => {
 });
 
 // Mark Messages as Read
-app.post("/api/chat/read", (req, res) => {
+app.post("/api/chat/read", async (req, res) => {
   const { messageIds, role } = req.body;
   if (!messageIds || !Array.isArray(messageIds) || !role) {
     res.status(400).json({ error: "Missing messageIds (array) or role parameter." });
     return;
   }
 
-  chatMessages.forEach(m => {
+  chatMessages.forEach((m: any) => {
     if (messageIds.includes(m.id)) {
       if (!m.readBy.includes(role)) {
         m.readBy.push(role);
       }
     }
   });
+  appDb.save();
 
   broadcastToAllWebSockets({
     type: "messages_read",
@@ -681,14 +553,14 @@ app.post("/api/chat/upload-mock", (req, res) => {
 });
 
 // Get Comments for specific Case
-app.get("/api/cases/:caseId/comments", (req, res) => {
+app.get("/api/cases/:caseId/comments", async (req, res) => {
   const { caseId } = req.params;
-  const comments = caseComments.filter(c => c.caseId === caseId);
+  const comments = caseComments.filter((c: any) => c.caseId === caseId);
   res.json({ comments });
 });
 
 // Post Comment on Case
-app.post("/api/cases/:caseId/comments", (req, res) => {
+app.post("/api/cases/:caseId/comments", async (req, res) => {
   const { caseId } = req.params;
   const { sender, role, text } = req.body;
   if (!sender || !role || !text) {
@@ -696,7 +568,7 @@ app.post("/api/cases/:caseId/comments", (req, res) => {
     return;
   }
 
-  const comment: CaseComment = {
+  const comment = {
     id: `cmt-${Date.now()}`,
     caseId,
     sender,
@@ -707,6 +579,7 @@ app.post("/api/cases/:caseId/comments", (req, res) => {
   };
 
   caseComments.push(comment);
+  appDb.save();
 
   broadcastToAllWebSockets({
     type: "comment_added",
@@ -714,7 +587,7 @@ app.post("/api/cases/:caseId/comments", (req, res) => {
   });
 
   // Create Case update alert
-  const newNotif: NotificationItem = {
+  const newNotif = {
     id: `NT-${Date.now()}`,
     category: "clinical",
     level: "info",
@@ -727,6 +600,7 @@ app.post("/api/cases/:caseId/comments", (req, res) => {
   };
 
   notificationsHistory.unshift(newNotif);
+  appDb.save();
 
   broadcastToAllWebSockets({
     type: "notification_dispatched",
@@ -737,37 +611,39 @@ app.post("/api/cases/:caseId/comments", (req, res) => {
 });
 
 // Get Notifications History
-app.get("/api/notifications", (req, res) => {
+app.get("/api/notifications", async (req, res) => {
   res.json({ notifications: notificationsHistory });
 });
 
 // Acknowledge/Read Notification
-app.post("/api/notifications/acknowledge", (req, res) => {
+app.post("/api/notifications/acknowledge", async (req, res) => {
   const { id } = req.body;
   if (!id) {
     res.status(400).json({ error: "id parameter is missing." });
     return;
   }
 
-  notificationsHistory = notificationsHistory.map(n => {
+  notificationsHistory = notificationsHistory.map((n: any) => {
     if (n.id === id) {
       return { ...n, unread: false };
     }
     return n;
   });
+  appDb.data.notificationsHistory = notificationsHistory;
+  appDb.save();
 
   res.json({ success: true });
 });
 
 // Trigger Alert Simulation
-app.post("/api/notifications/trigger-simulation", (req, res) => {
+app.post("/api/notifications/trigger-simulation", async (req, res) => {
   const { category, level, title, message, type } = req.body;
   if (!title || !message) {
     res.status(400).json({ error: "Missing title or message for simulation." });
     return;
   }
 
-  const newNotif: NotificationItem = {
+  const newNotif = {
     id: `NT-${Date.now()}`,
     category: category || "clinical",
     level: level || "info",
@@ -782,6 +658,7 @@ app.post("/api/notifications/trigger-simulation", (req, res) => {
   };
 
   notificationsHistory.unshift(newNotif);
+  appDb.save();
 
   broadcastToAllWebSockets({
     type: "notification_dispatched",
@@ -848,6 +725,7 @@ app.post("/api/invoices", (req, res) => {
   };
 
   invoicesList.unshift(newInvoice);
+  appDb.save();
 
   // Auto dispatch workspace notification
   const newNotif: NotificationItem = {
@@ -864,6 +742,7 @@ app.post("/api/invoices", (req, res) => {
   };
 
   notificationsHistory.unshift(newNotif);
+  appDb.save();
 
   broadcastToAllWebSockets({
     type: "notification_dispatched",
@@ -919,6 +798,7 @@ app.post("/api/invoices/:id/payments", (req, res) => {
   } else {
     invoice.status = "unpaid";
   }
+  appDb.save();
 
   // Auto log payment alert
   const newNotif: NotificationItem = {
@@ -935,6 +815,7 @@ app.post("/api/invoices/:id/payments", (req, res) => {
   };
 
   notificationsHistory.unshift(newNotif);
+  appDb.save();
 
   broadcastToAllWebSockets({
     type: "notification_dispatched",
@@ -992,6 +873,7 @@ app.post("/api/deliveries", (req, res) => {
   };
 
   deliveriesList.unshift(newDelivery);
+  appDb.save();
 
   // Send real-time notification
   const newNotif: NotificationItem = {
@@ -1008,6 +890,7 @@ app.post("/api/deliveries", (req, res) => {
   };
 
   notificationsHistory.unshift(newNotif);
+  appDb.save();
 
   broadcastToAllWebSockets({
     type: "notification_dispatched",
@@ -1106,6 +989,7 @@ app.post("/api/deliveries/:id/status", (req, res) => {
   };
 
   notificationsHistory.unshift(newNotif);
+  appDb.save();
 
   broadcastToAllWebSockets({
     type: "notification_dispatched",
@@ -1127,6 +1011,13 @@ app.get("/api/health", (req, res) => {
 
 // Vite Middleware Integration
 async function bootstrap() {
+  appDb = await createJsonDb('data.db.json', defaultDb);
+  chatMessages = appDb.data.chatMessages;
+  caseComments = appDb.data.caseComments;
+  notificationsHistory = appDb.data.notificationsHistory;
+  invoicesList = appDb.data.invoicesList;
+  deliveriesList = appDb.data.deliveriesList;
+
   if (process.env.NODE_ENV !== "production") {
     console.log("Starting server in DEVELOPMENT mode with Vite HMR integration...");
     const vite = await createViteServer({
